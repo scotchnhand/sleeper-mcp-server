@@ -15,6 +15,8 @@ A Model Context Protocol (MCP) server that provides Claude Desktop with access t
 - **Trade Analysis**: Analyze potential trade targets and evaluate roster needs
 - **Intelligent Caching**: Optimized API usage with TTL-based caching
 - **Rate Limiting**: Respects Sleeper API limits with exponential backoff
+- **Multiple Deployment Options**: Run locally with Claude Desktop (stdio) or as a containerized service (SSE/HTTP) in Docker/Portainer
+- **Health Checks**: Built-in health and readiness endpoints for container orchestration
 
 ## Installation
 
@@ -41,9 +43,36 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+### Docker Installation
 
+For containerized deployment (ideal for Portainer or orchestrated environments):
 
-## Configuration
+```bash
+# Build the Docker image
+docker build -t sleeper-mcp:latest .
+
+# Run the container with SSE transport
+docker run -it -e TRANSPORT=sse -e SSE_PORT=8000 -p 8000:8000 sleeper-mcp:latest
+```
+
+Or use docker-compose for easier management (see [Docker & Portainer Setup](#docker--portainer-setup) below).
+
+## Configuration & Deployment
+
+### Transport Types
+
+The sleeper-mcp-server supports two transport modes for different deployment scenarios:
+
+**Stdio Transport (Default)** - For local development and Claude Desktop integration
+- Spawned on-demand by Claude Desktop
+- Best for: Personal use, development environments
+- Configuration: No special setup needed; works with standard Claude Desktop config
+
+**SSE/HTTP Transport** - For containerized deployment in Docker/Portainer
+- Runs as a persistent background service
+- Exposes REST endpoints for health checks and monitoring
+- Best for: Production deployments, container orchestration, Portainer management
+- Configuration: Set `TRANSPORT=sse` environment variable
 
 ### Claude Desktop MCP Configuration
 
@@ -111,12 +140,138 @@ Add the following configuration to your Claude Desktop MCP settings file:
 
 ### Environment Variables
 
+**Transport Configuration:**
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TRANSPORT` | Transport type (`stdio` for Claude Desktop, `sse` for containers) | `stdio` |
+| `SSE_PORT` | Port for SSE/HTTP server (when TRANSPORT=sse) | `8000` |
+| `SSE_HOST` | Host to bind SSE/HTTP server (when TRANSPORT=sse) | `0.0.0.0` |
+
+**API Configuration:**
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SLEEPER_API_BASE_URL` | Sleeper API endpoint | `https://api.sleeper.app/v1` |
 | `CACHE_TTL_SECONDS` | Default cache TTL in seconds | `3600` |
-| `LOG_LEVEL` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `MAX_RETRIES` | Maximum API retry attempts | `3` |
+
+**Logging:**
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_LEVEL` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) | `INFO` |
+
+### Docker & Portainer Setup
+
+#### Dockerfile
+
+Create a `Dockerfile` in the repository root:
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy repository files
+COPY . .
+
+# Install the package
+RUN pip install -e .
+
+# Configure for SSE transport
+ENV TRANSPORT=sse
+ENV SSE_PORT=8000
+ENV SSE_HOST=0.0.0.0
+
+# Expose the port
+EXPOSE 8000
+
+# Health check for container orchestration
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# Run the server
+CMD ["python", "-m", "sleeper_mcp_server"]
+```
+
+#### Docker Compose
+
+Create a `docker-compose.yml` file for easy local testing:
+
+```yaml
+version: '3.8'
+
+services:
+  sleeper-mcp:
+    build: .
+    container_name: sleeper-mcp-server
+    environment:
+      TRANSPORT: sse
+      SSE_PORT: 8000
+      SSE_HOST: 0.0.0.0
+      LOG_LEVEL: INFO
+      SLEEPER_API_BASE_URL: https://api.sleeper.app/v1
+      CACHE_TTL_SECONDS: 3600
+      MAX_RETRIES: 3
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+```
+
+Run with:
+```bash
+docker-compose up -d
+```
+
+#### Portainer Deployment
+
+To deploy in Portainer:
+
+1. **Create Stack via UI:**
+   - Go to Stacks → Add Stack
+   - Paste the docker-compose.yml content above
+   - Or upload the docker-compose.yml file
+
+2. **Configure Environment Variables:**
+   - In the stack editor, set environment variables before deploying:
+     - `TRANSPORT`: `sse`
+     - `SSE_PORT`: `8000`
+     - `LOG_LEVEL`: `INFO`
+     - `SLEEPER_API_BASE_URL`: `https://api.sleeper.app/v1`
+
+3. **Deploy:**
+   - Click Deploy Stack
+   - Monitor the container in Portainer dashboard
+
+4. **Verify:**
+   - Check container status (should be Running)
+   - Access health endpoint: `http://<host>:8000/health`
+   - Access readiness endpoint: `http://<host>:8000/readiness`
+
+#### Using Environment Files (.env)
+
+For Portainer deployments, use `.env` files to manage environment variables:
+
+Create a `.env` file:
+```env
+TRANSPORT=sse
+SSE_PORT=8000
+SSE_HOST=0.0.0.0
+LOG_LEVEL=INFO
+SLEEPER_API_BASE_URL=https://api.sleeper.app/v1
+CACHE_TTL_SECONDS=3600
+MAX_RETRIES=3
+```
+
+**Important:** Never commit `.env` files to version control. Add to `.gitignore`:
+```
+.env
+.env.local
+.env.*.local
+```
 
 ## Available MCP Tools
 
@@ -399,6 +554,134 @@ Different data types have optimized cache TTL values:
 "Find quarterback trade targets for my team"
 ```
 
+## Health Checks & Monitoring
+
+When running in SSE/HTTP mode, the server provides endpoints for health monitoring:
+
+### GET /health
+
+Simple health check endpoint. Returns 200 OK if the server is running.
+
+```bash
+curl http://localhost:8000/health
+# Response: {"status": "ok"}
+```
+
+### GET /readiness
+
+Readiness probe that checks if the server has completed initialization. Returns 503 if still initializing.
+
+```bash
+curl http://localhost:8000/readiness
+# Response (ready): {"status": "ready"}
+# Response (initializing): {"status": "initializing"} [HTTP 503]
+```
+
+### Docker Health Checks
+
+The provided Dockerfile includes a health check configuration:
+
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+```
+
+This allows Docker and container orchestration systems to:
+- Automatically restart unhealthy containers
+- Prevent traffic to unhealthy instances
+- Monitor service health in dashboards
+
+### Portainer Monitoring
+
+In Portainer:
+1. View container status and health in the dashboard
+2. Check logs for errors: Container → Logs
+3. Monitor resource usage: Container → Stats
+4. Test endpoints manually via Console
+
+## Security & Credentials
+
+### Handling API Keys and Passwords
+
+**Development Environment:**
+- Store credentials in a `.env` file (never commit to git)
+- Load from `.env` using environment variables
+- Example `.env`:
+  ```env
+  SLEEPER_API_BASE_URL=https://api.sleeper.app/v1
+  ```
+
+**Production Environment (Portainer/Docker):**
+- Use Docker secrets (recommended for production)
+- Or use environment variables passed at deployment time
+- Never hardcode credentials in Dockerfile
+
+**Docker Secrets Example:**
+```yaml
+version: '3.8'
+
+secrets:
+  sleeper_api_url:
+    file: ./secrets/sleeper_api_url.txt
+
+services:
+  sleeper-mcp:
+    image: sleeper-mcp:latest
+    secrets:
+      - sleeper_api_url
+    environment:
+      SLEEPER_API_BASE_URL_FILE: /run/secrets/sleeper_api_url
+```
+
+### Masking Sensitive Information in Logs
+
+**Important:** Be cautious with sensitive data in logs:
+
+- ⚠️ **DEBUG mode logs verbose information** - Avoid DEBUG in production
+- Log Level defaults to `INFO` - recommended for most environments
+- Sensitive API responses are NOT logged by default
+- User data from the Sleeper API is only logged with DEBUG level
+
+**Production Recommendation:**
+```bash
+# Ensure LOG_LEVEL is set to INFO or higher
+LOG_LEVEL=INFO python -m sleeper_mcp_server
+```
+
+### Container Security Best Practices
+
+1. **Run as non-root user (optional enhancement):**
+   ```dockerfile
+   RUN useradd -m -u 1000 appuser
+   USER appuser
+   ```
+
+2. **Use minimal base images:**
+   - Use `python:3.11-slim` (recommended) instead of full Python image
+   - Reduces attack surface and image size
+
+3. **Network isolation:**
+   - Bind to specific interface instead of all interfaces
+   - Set `SSE_HOST=127.0.0.1` for localhost-only access
+   - Use firewalls to restrict access
+
+4. **Environment variable security:**
+   - Use Docker secrets instead of plain environment variables
+   - Rotate credentials regularly
+   - Limit secret access to necessary containers
+
+5. **Monitoring and logging:**
+   - Aggregate logs from containers
+   - Monitor for suspicious activity
+   - Use container scanning tools to check for vulnerabilities
+
+### Credential Rotation
+
+For long-running containers:
+- Rotate API credentials periodically
+- Restart containers to pick up new credentials
+- Use container orchestration to manage rolling updates
+
 ## Troubleshooting
 
 ### Common Issues
@@ -503,9 +786,27 @@ Enable debug logging for detailed troubleshooting:
 
 ## Development
 
+### Running with Different Transports
+
+**Stdio Transport (default - for Claude Desktop):**
+```bash
+python -m sleeper_mcp_server
+```
+
+**SSE Transport (for Docker/Portainer testing):**
+```bash
+TRANSPORT=sse python -m sleeper_mcp_server
+# Server will listen on http://localhost:8000
+```
+
 ### Running Tests
 
+The project uses pytest with async support and coverage reporting. Configuration is in `pyproject.toml`.
+
 ```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
 # Run all tests
 pytest
 
@@ -514,7 +815,15 @@ pytest --cov=sleeper_mcp_server
 
 # Run specific test file
 pytest tests/test_server.py
+
+# Run with verbose output
+pytest -v
+
+# Run specific test marker
+pytest -m "not slow"
 ```
+
+Note: No tests currently exist, but the infrastructure is configured and ready. Tests for the SSE transport implementation are welcome contributions.
 
 ### Code Quality
 
