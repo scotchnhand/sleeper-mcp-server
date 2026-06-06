@@ -30,6 +30,7 @@ from .tools.league_tools import LeagueTools
 from .tools.matchup_tools import MatchupTools
 from .tools.trade_tools import TradeTools
 from .tools.player_tools import PlayerTools
+from .sse_server import SSEServerApp
 
 logger = logging.getLogger(__name__)
 
@@ -1313,51 +1314,98 @@ class SleeperMCPServer:
                 formatted += f"• {stat_name}: {value}\n"
         
         return formatted
-    
-    async def run(self) -> None:
-        """Run the MCP server."""
-        # Initialize server components
-        await self.initialize()
-        
-        # Run the server with stdio transport
+
+    def _get_initialization_options(self) -> InitializationOptions:
+        """Get the MCP server initialization options.
+
+        Returns:
+            InitializationOptions configured for this server
+        """
+        return InitializationOptions(
+            server_name="sleeper-mcp-server",
+            server_version="0.1.0",
+            capabilities=self.server.get_capabilities(
+                notification_options=NotificationOptions(
+                    prompts_changed=False,
+                    resources_changed=False,
+                    tools_changed=False
+                ),
+                experimental_capabilities={}
+            )
+        )
+
+    async def _run_stdio(self) -> None:
+        """Run the MCP server with stdio transport."""
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
                 write_stream,
-                InitializationOptions(
-                    server_name="sleeper-mcp-server",
-                    server_version="0.1.0",
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(
-                            prompts_changed=False,
-                            resources_changed=False,
-                            tools_changed=False
-                        ),
-                        experimental_capabilities={}
-                    )
-                )
+                self._get_initialization_options()
             )
+
+    async def _run_sse(self, host: str, port: int) -> None:
+        """Run the MCP server with SSE/HTTP transport.
+
+        Args:
+            host: Host to bind the HTTP server to
+            port: Port to bind the HTTP server to
+        """
+        sse_app = SSEServerApp(self)
+        await sse_app.start(host, port)
+
+    async def run(self, transport_type: str = "stdio", sse_host: str = "0.0.0.0", sse_port: int = 8000) -> None:
+        """Run the MCP server.
+
+        Args:
+            transport_type: Transport to use ("stdio" or "sse")
+            sse_host: Host for SSE server (only used if transport_type is "sse")
+            sse_port: Port for SSE server (only used if transport_type is "sse")
+        """
+        # Initialize server components
+        await self.initialize()
+
+        # Run with selected transport
+        if transport_type == "sse":
+            await self._run_sse(sse_host, sse_port)
+        else:
+            await self._run_stdio()
 
 
 async def main() -> None:
     """Main entry point for the MCP server."""
+    from .config import TransportConfig
+
+    # Load transport configuration from environment
+    config = TransportConfig.from_env()
+
     # Configure logging to stderr to avoid interfering with MCP protocol
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, config.log_level),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         stream=sys.stderr
     )
-    
+
     try:
+        # Log startup information
+        if config.transport_type == "sse":
+            logger.info(f"Starting SSE server on {config.sse_host}:{config.sse_port}")
+        else:
+            logger.info("Starting stdio-based MCP server")
+
         # Create and run server
         server = SleeperMCPServer()
-        await server.run()
+        await server.run(
+            transport_type=config.transport_type,
+            sse_host=config.sse_host,
+            sse_port=config.sse_port
+        )
     except KeyboardInterrupt:
         # Handle graceful shutdown
-        pass
+        logger.info("Server shutdown by user")
     except Exception as e:
         # Log errors to stderr to avoid breaking MCP protocol
         logger.error(f"Fatal server error: {e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":

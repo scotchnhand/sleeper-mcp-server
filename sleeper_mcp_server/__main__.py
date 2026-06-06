@@ -9,16 +9,22 @@ from .server import main as server_main
 
 def main(args: Optional[list[str]] = None) -> int:
     """Main entry point for the Sleeper MCP server.
-    
+
     Args:
         args: Command line arguments (defaults to sys.argv[1:])
-        
+
     Returns:
         Exit code (0 for success, non-zero for error)
+
+    Environment variables:
+        TRANSPORT: "stdio" or "sse" (default: "stdio")
+        SSE_PORT: Port for SSE server (default: 8000)
+        SSE_HOST: Host for SSE server (default: "0.0.0.0")
+        LOG_LEVEL: Logging level (default: "INFO")
     """
     if args is None:
         args = sys.argv[1:]
-    
+
     try:
         # Run the MCP server
         asyncio.run(server_main())
